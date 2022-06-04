@@ -1,0 +1,5 @@
+# 003-Restaurant_Reviews
+
+My first NLP project utilizing the spark-nlp library. This is constructed on a DataBricks / Amazon S3 stack running Apache Spark. The code is integrated to Git for version control. Mainly, this project is able to achieve four main goals for me in parallel. Firstly, I familiarize myself with big data architectures. Second, I continue to familiarize myself with version control via Git. Third, I explore a new category of machine learning; Natural Language Processing. This is a very prominent niche of machine learning, and the sooner I can learn it, the better. Fourth, and this ties into the first point slightly, I begin to use pyspark instead of my previous libraries (pandas, np, sklearn, keras, etc.). Pyspark is better suited for big data, knowledge of this paradigm will be essential for me to move forward with my career.
+
+As this is my first project using a lot of these tools, a large part of this will be exploratory. The DataBricks notebook will be updated via Git as I progress. The finished jupyter notebook will only be posted upon completion of the project.
