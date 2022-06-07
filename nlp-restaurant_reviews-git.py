@@ -298,7 +298,219 @@ train.show()
 # COMMAND ----------
 
 lr = LogisticRegression()
-lr.fit(train)
+lrModel = lr.fit(train)
+
+# COMMAND ----------
+
+lr_pred = lrModel.evaluate(test)
+
+# COMMAND ----------
+
+lr_pred.accuracy
+
+# COMMAND ----------
+
+# MAGIC %md # Putting it all together
+# MAGIC 
+# MAGIC Now I can start looking at training entire pipelined models, applying grid searches on parameters, and testing different models. I will now describe a high-level summary of the tasks to be completed:
+# MAGIC 
+# MAGIC 1) Pipeline for initial data processing, including the following steps:
+# MAGIC     * Document, Sentencing -- Standard
+# MAGIC     * Tokenization -- Standard
+# MAGIC     * Spell checking -- ContextSpellChecker provided the best results in the exploration phase above
+# MAGIC     * Lemmatization -- Standard
+# MAGIC     * Stop-word removal -- Need to test several approaches:
+# MAGIC         * No stop-words
+# MAGIC         * Custom list as used above
+# MAGIC         * Pretrained model
+# MAGIC     * Finisher (Standard)
+# MAGIC     * HashingTF (For speed vs CountVectorizer)
+# MAGIC     * IDF Layer (Standard)
+# MAGIC     
+# MAGIC 2) Model pipelines constructed where previous pipeline ends:
+# MAGIC     * One for each model to be tested
+# MAGIC     * Use cross validation and parameter grids to identify strongest candidates
+# MAGIC     
+# MAGIC The model pipelines will be separate from the data processing pipeline due to the fact that the data processing pipeline will be identical regardless of the model used. This will cut down on compute time at the cost of memory. Currently, memory is not an issue.
+
+# COMMAND ----------
+
+# MAGIC %md ## Data Pipelines
+# MAGIC 
+# MAGIC I will construct three different data pipelines, one for each approach to the stop-word problem.
+
+# COMMAND ----------
+
+!pip install mlflow
+
+!pip install tensorflow
+
+# COMMAND ----------
+
+import pyspark
+from pyspark.ml import Pipeline
+from pyspark.sql.functions import col
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.ml.classification import NaiveBayes, RandomForestClassifier, DecisionTreeClassifier, LinearSVC, LogisticRegression
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, CrossValidatorModel
+from pyspark.ml.feature import RegexTokenizer, HashingTF, IDF, StopWordsRemover
+
+import sparknlp
+from sparknlp.base import * # Change once all used modules are known
+from sparknlp.annotator import * # Change once all used modules are known
+
+import mlflow.spark
+
+# COMMAND ----------
+
+# ---=== Base pipeline with pretrained stopwords ===---
+
+document = DocumentAssembler()\
+                .setInputCol('Review')\
+                .setOutputCol('document')\
+
+sentence = SentenceDetector()\
+                .setInputCols('document')\
+                .setOutputCol('sentence')
+
+tokenizer = RegexTokenizer()\
+                .setInputCols('sentence')\
+                .setOutputCol('token')\
+                .setPattern(r'[^a-zA-Z0-9_\']')
+
+checker = ContextSpellCheckerModel\
+                .pretrained()\
+                .setInputCols("token")\
+                .setOutputCol("checked")
+
+lemmatizer = LemmatizerModel()\
+                .pretrained()\
+                .setInputCols('checked')\
+                .setOutputCol('lemma')
+
+stopwords = StopWordsCleaner()\
+                .pretrained('stopwords_iso', 'en')\
+                .setInputCols('lemma')\
+                .setOutputCol('cleaned')
+
+finisher = Finisher()\
+                .setInputCols('cleaned')\
+                .setOutputCols('finished')
+
+hashingTF = HashingTF()\
+                .setInputCol('finished')\
+                .setOutputCol('rawFeatures')
+
+idf = IDF()\
+                .setInputCol('rawFeatures')\
+                .setOutputCol('features')
+
+pipe_sw_pre = Pipeline()\
+                .setStages([document, sentence, tokenizer, checker, 
+                            lemmatizer, stopwords, finisher, hashingTF, idf])
+
+# ---=== Custom stop words in the pipeline ===---
+
+stop_words = ['the', 'be', 'now', 'get', 'on', 'and', 'so', 'want', 'I', 'it', 'that', 'honesty', 'you', 'they', 'them', 'this', 'by', 'during', 'holiday', 'off', 'back', 'what',
+             'say', 'to', 'still', 'end', 'up', 'way', 'little', 'in', 'let', 'alone', 'at', 'all', 'because', 'oh', 'stuff', 'red', 'that\'s', 'a', 'of', 'some']
+
+finisher.setInputCols('lemma')\
+        .setOutputCols('finished')
+
+stopwords = StopWordsRemover(stopWords = stop_words)\
+                .setInputCol('finished')\
+                .setOutputCol('cleaned')
+
+hashingTF.setInputCol('cleaned')\
+         .setOutputCol('rawFeatures')
+                
+
+pipe_sw_cstm = Pipeline()\
+                .setStages([document, sentence, tokenizer, checker, 
+                            lemmatizer, finisher, stopwords, hashingTF, idf])
+
+# ---=== No stop words in the pipeline ===---
+
+finisher.setInputCols('lemma')\
+        .setOutputCols('finished')
+
+hashingTF.setInputCol('finished')\
+         .setOutputCol('rawFeatures')
+
+pipe_sw_none = Pipeline()\
+                .setStages([document, sentence, tokenizer, checker, 
+                            lemmatizer, finisher, hashingTF, idf])
+
+# COMMAND ----------
+
+# MAGIC %md I wish to use a classification model that allows for explainability of the data. This is a supervised classification problem, and so the possible models I am aware of that meet these criteria are Decision Trees and Logistic Regression. I will start with random-ish values for the parameters and adjust as results come in.
+
+# COMMAND ----------
+
+lr = LogisticRegression()
+lr_params = ParamGridBuilder()\
+            .addGrid(lr.regParam, [0.1, 0.01])\
+            .addGrid(lr.maxIter, [1, 5, 10, 25])\
+            .build()
+
+dt = DecisionTreeClassifier()
+dt_params = ParamGridBuilder()\
+            .addGrid(dt.maxBins, [10,50,100])\
+            .addGrid(dt.maxDepth, [10, 50, 100])\
+            .build()
+
+# COMMAND ----------
+
+df = sqlContext.sql("Select * FROM nlp_restaurant_reviews")
+
+model_info = {
+    'lr' : lr,
+    'dt' : dt
+}
+
+param_info = {
+    'lr' : lr_params,
+    'dt' : dt_params
+}
+
+pipe_info = {
+    'sw_pre' : pipe_sw_pre,
+    'sw_cstm' : pipe_sw_cstm,
+    'sw_none' : pipe_sw_none
+}
+
+df = df.withColumn('label', col('Liked')).select(['label', 'Review'])
+train, test = df.randomSplit([0.8, 0.2], seed = 31415)
+
+# , pipe_sw_custom, pipe_sw_none
+# , 'dt'
+
+# I will be constructing a JSON-like list containing the results of the calculations.
+results_info = {}
+
+#for pipe_label, pipe in pipe_info.items():
+    #for model_label, model in model_info.items():
+pipe_added = Pipeline().setStages([pipe_sw_cstm, lr])
+
+cv = CrossValidator(estimator = pipe_added,
+                   estimatorParamMaps = lr_params,
+                   evaluator = BinaryClassificationEvaluator(),
+                   numFolds = 3,
+                   seed = 31415
+)
+
+cvModel = cv.fit(train)
+pred = cvModel.transform(test)
+        
+"""
+model_results = {
+model_label : pred.accuracy
+}
+
+results_info = {
+pipe_label : model_results
+}
+"""
 
 # COMMAND ----------
 
