@@ -349,17 +349,15 @@ lr_pred.accuracy
 
 import pyspark
 from pyspark.ml import Pipeline
-from pyspark.sql.functions import col
+from pyspark.ml.classification import DecisionTreeClassifier, LogisticRegression
 from pyspark.ml.evaluation import BinaryClassificationEvaluator
-from pyspark.ml.classification import NaiveBayes, RandomForestClassifier, DecisionTreeClassifier, LinearSVC, LogisticRegression
-from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, CrossValidatorModel
 from pyspark.ml.feature import RegexTokenizer, HashingTF, IDF, StopWordsRemover
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, CrossValidatorModel, TrainValidationSplit
+from pyspark.sql.functions import col
 
 import sparknlp
-from sparknlp.base import * # Change once all used modules are known
 from sparknlp.annotator import * # Change once all used modules are known
-
-import mlflow.spark
+from sparknlp.base import * # Change once all used modules are known
 
 # COMMAND ----------
 
@@ -486,31 +484,38 @@ train, test = df.randomSplit([0.8, 0.2], seed = 31415)
 # , 'dt'
 
 # I will be constructing a JSON-like list containing the results of the calculations.
-results_info = {}
-
-#for pipe_label, pipe in pipe_info.items():
-    #for model_label, model in model_info.items():
-pipe_added = Pipeline().setStages([pipe_sw_cstm, lr])
-
-cv = CrossValidator(estimator = pipe_added,
+        
+"""
+cv = TrainValidationSplit(estimator = pipe_added,
                    estimatorParamMaps = lr_params,
                    evaluator = BinaryClassificationEvaluator(),
-                   numFolds = 3,
-                   seed = 31415
+                   seed = 31415,
+                   parallelism=1
 )
 
 cvModel = cv.fit(train)
 pred = cvModel.transform(test)
-        
 """
-model_results = {
-model_label : pred.accuracy
-}
 
-results_info = {
-pipe_label : model_results
-}
-"""
+# COMMAND ----------
+
+results_info = {}
+evaluator = BinaryClassificationEvaluator()
+
+for pipe_label, pipe in pipe_info.items():
+    model_results = {}
+
+    for model_label, model in model_info.items():
+        
+        pipe_added = Pipeline().setStages([pipe, model])
+        pipe_trained = pipe_added.fit(train)
+        pipe_data = pipe_trained.transform(train)
+
+        areaUnderROC = evaluator.evaluate(pipe_data)
+        print(f'{pipe_label} - {model_label}: {areaUnderROC}')
+        
+        model_results[model_label] = areaUnderROC
+    results_info[pipe_label] = model_results
 
 # COMMAND ----------
 
